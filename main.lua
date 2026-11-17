@@ -8,133 +8,596 @@ pcall(function() setidentity(8) end)
 pcall(function() syn and syn.set_thread_identity(8) end)
 getgenv().__BYPASS_ACTIVE = true
 getgenv().__cheatloaded   = nil
-getgenv().__scriptname    = nil
 
 RunService.Heartbeat:Connect(function()
     pcall(function() setidentity(8) end)
 end)
 
-local function safeHook(fn, cb)
-    if type(fn) == "function" then return hookfunction(fn, cb) end
+local function safeHook(fn,cb)
+    if type(fn)=="function" then return hookfunction(fn,cb) end
     return fn
 end
 
-local repo         = "https://cdn.jsdelivr.net/gh/violin-suzutsuki/LinoriaLib@main/"
-local Library      = loadstring(game:HttpGet(repo .. "Library.lua"))()
-local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
-local SaveManager  = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
-
-local Window = Library:CreateWindow({
-    Title        = "Kori | Da Hood",
-    Center       = true,
-    AutoShow     = true,
-    TabPadding   = 8,
-    MenuFadeTime = 0.2,
-})
-
-local Tabs = {
-    Combat   = Window:AddTab("Combat"),
-    Visual   = Window:AddTab("Visual"),
-    Movement = Window:AddTab("Movement"),
-    Hotkeys  = Window:AddTab("Hotkeys"),
-    Config   = Window:AddTab("Config"),
-    Settings = Window:AddTab("Settings"),
+----------------------------------------------------------------
+-- STATE
+----------------------------------------------------------------
+local S = {
+    UIVisible=true, SilentMode=false, TeamCheck=true,
+    ESPEnabled=false, ESPBoxes=true, ESPCorner=true,
+    ESPNames=true, ESPDistance=true, ESPHealthBar=true,
+    ESPTracers=false, ESPSkeleton=false, ESPMaxDist=500,
+    AimbotEnabled=false, AimbotFOV=150, AimbotSmooth=8,
+    AimbotPredict=true, AimbotPredF=4, AimbotFOVCirc=true,
+    SilentAim=false, SilentChance=90, SilentPredict=true, SilentPredF=3,
+    TriggerEnabled=false, TriggerDelMin=60, TriggerDelMax=130,
+    TriggerFOV=25, TriggerMaxCPS=8, TriggerBurst=220,
+    TriggerPredict=true, TriggerHuman=true, TriggerHold=false,
+    CamlockEnabled=false, CamlockSmooth=4, CamlockPredF=3,
+    FlyEnabled=false, FlyNoClip=true, FlySpeed=60,
+    FlyBoost=180, FlyAccel=8,
 }
 
-local AimbotBox   = Tabs.Combat:AddLeftGroupbox("Aimbot")
-local SilentBox   = Tabs.Combat:AddRightGroupbox("Silent Aim")
-local TriggerBox  = Tabs.Combat:AddLeftGroupbox("Triggerbot")
-local CamlockBox  = Tabs.Combat:AddRightGroupbox("Camlock")
-local ESPBox      = Tabs.Visual:AddLeftGroupbox("ESP")
-local ESPStyleBox = Tabs.Visual:AddRightGroupbox("ESP Style")
-local FlyBox      = Tabs.Movement:AddLeftGroupbox("Fly")
-local HotkeyBox   = Tabs.Hotkeys:AddLeftGroupbox("Rebind Keys")
-local ConfigBox   = Tabs.Config:AddLeftGroupbox("Config Manager")
-local UIBox       = Tabs.Settings:AddLeftGroupbox("Interface")
-local ThemeBox    = Tabs.Settings:AddRightGroupbox("Theme")
-
-local Options = Library.Options
-local Toggles = Library.Toggles
-
-local function Notify(title, body, duration)
-    if Toggles.SilentMode and Toggles.SilentMode.Value then return end
-    Library:Notify(title, body, duration or 3)
+----------------------------------------------------------------
+-- NOTIFY
+----------------------------------------------------------------
+local function Notify(msg)
+    if S.SilentMode then return end
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification",{
+            Title="Kori", Text=msg, Duration=3
+        })
+    end)
 end
 
-local UIVisible = true
-UIBox:AddLabel("UI Toggle Key (default: Left Alt)")
-UIBox:AddKeybind("UIToggleKey", {
-    Text    = "Toggle UI",
-    Default = Enum.KeyCode.LeftAlt,
-    Mode    = "Toggle",
-})
-UIBox:AddToggle("SilentMode", {
-    Text    = "Silent Mode (no notifications)",
-    Default = false,
-})
-UIBox:AddToggle("GlobalTeamCheck", { Text = "Global Team Check", Default = true })
+----------------------------------------------------------------
+-- UTILS
+----------------------------------------------------------------
+local function GetCharacter(p) return p and p.Character end
+local function GetPart(p,n) local c=GetCharacter(p); return c and c:FindFirstChild(n) end
+local function GetRoot(p) return GetPart(p,"HumanoidRootPart") end
+local function GetHead(p) return GetPart(p,"Head") end
+local function GetHum(p) local c=GetCharacter(p); return c and c:FindFirstChildOfClass("Humanoid") end
+local function IsAlive(p) local h=GetHum(p); return h and h.Health>0 end
+local function GetCenter() return Vector2.new(Camera.ViewportSize.X*.5,Camera.ViewportSize.Y*.5) end
+local function W2S(pos) local v,vis=Camera:WorldToViewportPoint(pos); return Vector2.new(v.X,v.Y),vis,v.Z end
+local function Predict(root,f) if not root then return nil end; return root.Position+root.AssemblyLinearVelocity*(f/60) end
 
-UserInputService.InputBegan:Connect(function(input, gpe)
-    if gpe then return end
-    local key = (Options.UIToggleKey and Options.UIToggleKey.Value) or Enum.KeyCode.LeftAlt
-    if input.KeyCode == key then
-        UIVisible = not UIVisible
-        Library:SetVisible(UIVisible)
+local function GetFOVTarget(fov)
+    fov=fov or S.AimbotFOV
+    local best,bestD=nil,math.huge
+    local center=GetCenter()
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p==LocalPlayer or not IsAlive(p) then continue end
+        if S.TeamCheck and p.Team==LocalPlayer.Team then continue end
+        local head=GetHead(p); if not head then continue end
+        local vp,os=W2S(head.Position)
+        if os then local d=(vp-center).Magnitude; if d<fov and d<bestD then bestD,best=d,p end end
+    end
+    return best
+end
+
+----------------------------------------------------------------
+-- GUI BUILDER
+----------------------------------------------------------------
+local CoreGui = game:GetService("CoreGui")
+local existing = CoreGui:FindFirstChild("KoriUI")
+if existing then existing:Destroy() end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name="KoriUI"
+ScreenGui.ResetOnSpawn=false
+ScreenGui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent=CoreGui
+
+-- colours
+local C = {
+    bg      = Color3.fromRGB(15,15,20),
+    panel   = Color3.fromRGB(22,22,30),
+    accent  = Color3.fromRGB(100,60,220),
+    accent2 = Color3.fromRGB(130,80,255),
+    text    = Color3.fromRGB(220,220,230),
+    muted   = Color3.fromRGB(120,120,140),
+    toggle_on  = Color3.fromRGB(100,60,220),
+    toggle_off = Color3.fromRGB(50,50,65),
+    slider_bg  = Color3.fromRGB(40,40,55),
+    white   = Color3.fromRGB(255,255,255),
+    tab_sel = Color3.fromRGB(100,60,220),
+    tab_unsel = Color3.fromRGB(30,30,40),
+}
+
+-- main window
+local Main = Instance.new("Frame")
+Main.Name="Main"
+Main.Size=UDim2.new(0,540,0,400)
+Main.Position=UDim2.new(0.5,-270,0.5,-200)
+Main.BackgroundColor3=C.bg
+Main.BorderSizePixel=0
+Main.Active=true
+Main.Draggable=true
+Main.Parent=ScreenGui
+
+Instance.new("UICorner",Main).CornerRadius=UDim.new(0,8)
+
+-- title bar
+local TitleBar=Instance.new("Frame")
+TitleBar.Size=UDim2.new(1,0,0,36)
+TitleBar.BackgroundColor3=C.panel
+TitleBar.BorderSizePixel=0
+TitleBar.Parent=Main
+Instance.new("UICorner",TitleBar).CornerRadius=UDim.new(0,8)
+
+local TitleFix=Instance.new("Frame")
+TitleFix.Size=UDim2.new(1,0,0.5,0)
+TitleFix.Position=UDim2.new(0,0,0.5,0)
+TitleFix.BackgroundColor3=C.panel
+TitleFix.BorderSizePixel=0
+TitleFix.Parent=TitleBar
+
+local TitleLabel=Instance.new("TextLabel")
+TitleLabel.Size=UDim2.new(1,-40,1,0)
+TitleLabel.Position=UDim2.new(0,12,0,0)
+TitleLabel.BackgroundTransparency=1
+TitleLabel.Text="Kori  |  Da Hood"
+TitleLabel.TextColor3=C.text
+TitleLabel.Font=Enum.Font.GothamBold
+TitleLabel.TextSize=14
+TitleLabel.TextXAlignment=Enum.TextXAlignment.Left
+TitleLabel.Parent=TitleBar
+
+-- close button
+local CloseBtn=Instance.new("TextButton")
+CloseBtn.Size=UDim2.new(0,24,0,24)
+CloseBtn.Position=UDim2.new(1,-30,0.5,-12)
+CloseBtn.BackgroundColor3=Color3.fromRGB(180,50,50)
+CloseBtn.Text="×"
+CloseBtn.TextColor3=C.white
+CloseBtn.Font=Enum.Font.GothamBold
+CloseBtn.TextSize=16
+CloseBtn.BorderSizePixel=0
+CloseBtn.Parent=TitleBar
+Instance.new("UICorner",CloseBtn).CornerRadius=UDim.new(0,4)
+CloseBtn.MouseButton1Click:Connect(function() ScreenGui.Enabled=false end)
+
+-- tab bar
+local TabBar=Instance.new("Frame")
+TabBar.Size=UDim2.new(1,0,0,30)
+TabBar.Position=UDim2.new(0,0,0,36)
+TabBar.BackgroundColor3=C.panel
+TabBar.BorderSizePixel=0
+TabBar.Parent=Main
+
+local TabBarLayout=Instance.new("UIListLayout")
+TabBarLayout.FillDirection=Enum.FillDirection.Horizontal
+TabBarLayout.SortOrder=Enum.SortOrder.LayoutOrder
+TabBarLayout.Parent=TabBar
+
+-- content area
+local Content=Instance.new("Frame")
+Content.Size=UDim2.new(1,0,1,-66)
+Content.Position=UDim2.new(0,0,0,66)
+Content.BackgroundTransparency=1
+Content.Parent=Main
+
+-- tab system
+local TabPages={}
+local TabButtons={}
+local ActiveTab=nil
+
+local function MakeTab(name,order)
+    local btn=Instance.new("TextButton")
+    btn.Size=UDim2.new(0,72,1,0)
+    btn.BackgroundColor3=C.tab_unsel
+    btn.BorderSizePixel=0
+    btn.Text=name
+    btn.TextColor3=C.muted
+    btn.Font=Enum.Font.Gotham
+    btn.TextSize=11
+    btn.LayoutOrder=order
+    btn.Parent=TabBar
+
+    local page=Instance.new("ScrollingFrame")
+    page.Size=UDim2.new(1,0,1,0)
+    page.BackgroundTransparency=1
+    page.BorderSizePixel=0
+    page.ScrollBarThickness=3
+    page.ScrollBarImageColor3=C.accent
+    page.CanvasSize=UDim2.new(0,0,0,0)
+    page.AutomaticCanvasSize=Enum.AutomaticSize.Y
+    page.Visible=false
+    page.Parent=Content
+
+    local layout=Instance.new("UIListLayout")
+    layout.SortOrder=Enum.SortOrder.LayoutOrder
+    layout.Padding=UDim.new(0,4)
+    layout.Parent=page
+
+    local pad=Instance.new("UIPadding")
+    pad.PaddingLeft=UDim.new(0,8)
+    pad.PaddingRight=UDim.new(0,8)
+    pad.PaddingTop=UDim.new(0,8)
+    pad.Parent=page
+
+    TabPages[name]=page
+    TabButtons[name]=btn
+
+    btn.MouseButton1Click:Connect(function()
+        if ActiveTab then
+            TabPages[ActiveTab].Visible=false
+            TabButtons[ActiveTab].BackgroundColor3=C.tab_unsel
+            TabButtons[ActiveTab].TextColor3=C.muted
+        end
+        ActiveTab=name
+        page.Visible=true
+        btn.BackgroundColor3=C.tab_sel
+        btn.TextColor3=C.white
+    end)
+    return page
+end
+
+local PgCombat  = MakeTab("Combat",1)
+local PgVisual  = MakeTab("Visual",2)
+local PgMove    = MakeTab("Move",3)
+local PgConfig  = MakeTab("Config",4)
+local PgSettings= MakeTab("Settings",5)
+
+-- activate first tab
+ActiveTab="Combat"
+TabPages["Combat"].Visible=true
+TabButtons["Combat"].BackgroundColor3=C.tab_sel
+TabButtons["Combat"].TextColor3=C.white
+
+----------------------------------------------------------------
+-- WIDGET HELPERS
+----------------------------------------------------------------
+local function Section(parent,title)
+    local f=Instance.new("Frame")
+    f.Size=UDim2.new(1,-0,0,24)
+    f.BackgroundTransparency=1
+    f.Parent=parent
+    local l=Instance.new("TextLabel")
+    l.Size=UDim2.new(1,0,1,0)
+    l.BackgroundTransparency=1
+    l.Text=string.upper(title)
+    l.TextColor3=C.accent2
+    l.Font=Enum.Font.GothamBold
+    l.TextSize=10
+    l.TextXAlignment=Enum.TextXAlignment.Left
+    l.Parent=f
+    return f
+end
+
+local function Toggle(parent,text,key,order)
+    local row=Instance.new("Frame")
+    row.Size=UDim2.new(1,0,0,28)
+    row.BackgroundColor3=C.panel
+    row.BorderSizePixel=0
+    row.LayoutOrder=order or 0
+    row.Parent=parent
+    Instance.new("UICorner",row).CornerRadius=UDim.new(0,5)
+
+    local lbl=Instance.new("TextLabel")
+    lbl.Size=UDim2.new(1,-50,1,0)
+    lbl.Position=UDim2.new(0,10,0,0)
+    lbl.BackgroundTransparency=1
+    lbl.Text=text
+    lbl.TextColor3=C.text
+    lbl.Font=Enum.Font.Gotham
+    lbl.TextSize=12
+    lbl.TextXAlignment=Enum.TextXAlignment.Left
+    lbl.Parent=row
+
+    local pill=Instance.new("Frame")
+    pill.Size=UDim2.new(0,36,0,18)
+    pill.Position=UDim2.new(1,-44,0.5,-9)
+    pill.BackgroundColor3=S[key] and C.toggle_on or C.toggle_off
+    pill.BorderSizePixel=0
+    pill.Parent=row
+    Instance.new("UICorner",pill).CornerRadius=UDim.new(1,0)
+
+    local dot=Instance.new("Frame")
+    dot.Size=UDim2.new(0,14,0,14)
+    dot.Position=S[key] and UDim2.new(1,-16,0.5,-7) or UDim2.new(0,2,0.5,-7)
+    dot.BackgroundColor3=C.white
+    dot.BorderSizePixel=0
+    dot.Parent=pill
+    Instance.new("UICorner",dot).CornerRadius=UDim.new(1,0)
+
+    local btn=Instance.new("TextButton")
+    btn.Size=UDim2.new(1,0,1,0)
+    btn.BackgroundTransparency=1
+    btn.Text=""
+    btn.Parent=row
+
+    btn.MouseButton1Click:Connect(function()
+        S[key]=not S[key]
+        pill.BackgroundColor3=S[key] and C.toggle_on or C.toggle_off
+        dot.Position=S[key] and UDim2.new(1,-16,0.5,-7) or UDim2.new(0,2,0.5,-7)
+    end)
+    return row
+end
+
+local function Slider(parent,text,key,min,max,order)
+    local row=Instance.new("Frame")
+    row.Size=UDim2.new(1,0,0,42)
+    row.BackgroundColor3=C.panel
+    row.BorderSizePixel=0
+    row.LayoutOrder=order or 0
+    row.Parent=parent
+    Instance.new("UICorner",row).CornerRadius=UDim.new(0,5)
+
+    local lbl=Instance.new("TextLabel")
+    lbl.Size=UDim2.new(1,-50,0,18)
+    lbl.Position=UDim2.new(0,10,0,4)
+    lbl.BackgroundTransparency=1
+    lbl.Text=text
+    lbl.TextColor3=C.text
+    lbl.Font=Enum.Font.Gotham
+    lbl.TextSize=11
+    lbl.TextXAlignment=Enum.TextXAlignment.Left
+    lbl.Parent=row
+
+    local valLbl=Instance.new("TextLabel")
+    valLbl.Size=UDim2.new(0,40,0,18)
+    valLbl.Position=UDim2.new(1,-48,0,4)
+    valLbl.BackgroundTransparency=1
+    valLbl.Text=tostring(S[key])
+    valLbl.TextColor3=C.accent2
+    valLbl.Font=Enum.Font.GothamBold
+    valLbl.TextSize=11
+    valLbl.TextXAlignment=Enum.TextXAlignment.Right
+    valLbl.Parent=row
+
+    local track=Instance.new("Frame")
+    track.Size=UDim2.new(1,-20,0,6)
+    track.Position=UDim2.new(0,10,0,26)
+    track.BackgroundColor3=C.slider_bg
+    track.BorderSizePixel=0
+    track.Parent=row
+    Instance.new("UICorner",track).CornerRadius=UDim.new(1,0)
+
+    local fill=Instance.new("Frame")
+    fill.Size=UDim2.new(math.clamp((S[key]-min)/(max-min),0,1),0,1,0)
+    fill.BackgroundColor3=C.accent
+    fill.BorderSizePixel=0
+    fill.Parent=track
+    Instance.new("UICorner",fill).CornerRadius=UDim.new(1,0)
+
+    local dragging=false
+    local function update(x)
+        local rel=math.clamp((x-track.AbsolutePosition.X)/track.AbsoluteSize.X,0,1)
+        local val=math.floor(min+rel*(max-min))
+        S[key]=val
+        fill.Size=UDim2.new(rel,0,1,0)
+        valLbl.Text=tostring(val)
+    end
+    track.InputBegan:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.MouseButton1 then dragging=true; update(i.Position.X) end
+    end)
+    UserInputService.InputChanged:Connect(function(i)
+        if dragging and i.UserInputType==Enum.UserInputType.MouseMovement then update(i.Position.X) end
+    end)
+    UserInputService.InputEnded:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.MouseButton1 then dragging=false end
+    end)
+    return row
+end
+
+local function Button(parent,text,cb,order)
+    local btn=Instance.new("TextButton")
+    btn.Size=UDim2.new(1,0,0,28)
+    btn.BackgroundColor3=C.accent
+    btn.BorderSizePixel=0
+    btn.Text=text
+    btn.TextColor3=C.white
+    btn.Font=Enum.Font.GothamBold
+    btn.TextSize=12
+    btn.LayoutOrder=order or 0
+    btn.Parent=parent
+    Instance.new("UICorner",btn).CornerRadius=UDim.new(0,5)
+    btn.MouseButton1Click:Connect(cb)
+    return btn
+end
+
+local function Label(parent,text,order)
+    local l=Instance.new("TextLabel")
+    l.Size=UDim2.new(1,0,0,20)
+    l.BackgroundTransparency=1
+    l.Text=text
+    l.TextColor3=C.muted
+    l.Font=Enum.Font.Gotham
+    l.TextSize=11
+    l.TextXAlignment=Enum.TextXAlignment.Left
+    l.LayoutOrder=order or 0
+    l.Parent=parent
+    return l
+end
+
+local function TextInput(parent,placeholder,order)
+    local box=Instance.new("TextBox")
+    box.Size=UDim2.new(1,0,0,28)
+    box.BackgroundColor3=C.panel
+    box.BorderSizePixel=0
+    box.Text=""
+    box.PlaceholderText=placeholder
+    box.PlaceholderColor3=C.muted
+    box.TextColor3=C.text
+    box.Font=Enum.Font.Gotham
+    box.TextSize=12
+    box.ClearTextOnFocus=false
+    box.LayoutOrder=order or 0
+    box.Parent=parent
+    Instance.new("UICorner",box).CornerRadius=UDim.new(0,5)
+    local pad=Instance.new("UIPadding")
+    pad.PaddingLeft=UDim.new(0,8)
+    pad.Parent=box
+    return box
+end
+
+----------------------------------------------------------------
+-- COMBAT TAB
+----------------------------------------------------------------
+Section(PgCombat,"Aimbot")
+Toggle(PgCombat,"Aimbot (Hold RMB)","AimbotEnabled",1)
+Toggle(PgCombat,"Prediction","AimbotPredict",2)
+Toggle(PgCombat,"FOV Circle","AimbotFOVCirc",3)
+Slider(PgCombat,"FOV Radius","AimbotFOV",10,500,4)
+Slider(PgCombat,"Smoothness","AimbotSmooth",1,50,5)
+Slider(PgCombat,"Pred Frames","AimbotPredF",0,15,6)
+
+Section(PgCombat,"Silent Aim")
+Toggle(PgCombat,"Silent Aim","SilentAim",7)
+Toggle(PgCombat,"SA Prediction","SilentPredict",8)
+Slider(PgCombat,"Hit Chance %","SilentChance",1,100,9)
+Slider(PgCombat,"SA Pred Frames","SilentPredF",0,15,10)
+
+Section(PgCombat,"Triggerbot")
+Toggle(PgCombat,"Triggerbot","TriggerEnabled",11)
+Toggle(PgCombat,"TB Prediction","TriggerPredict",12)
+Toggle(PgCombat,"Humanise","TriggerHuman",13)
+Toggle(PgCombat,"Hold Key Mode","TriggerHold",14)
+Slider(PgCombat,"Delay Min ms","TriggerDelMin",0,300,15)
+Slider(PgCombat,"Delay Max ms","TriggerDelMax",0,600,16)
+Slider(PgCombat,"TB FOV px","TriggerFOV",1,150,17)
+Slider(PgCombat,"Max CPS","TriggerMaxCPS",1,20,18)
+Slider(PgCombat,"Burst Gap ms","TriggerBurst",50,1000,19)
+
+Section(PgCombat,"Camlock")
+Toggle(PgCombat,"Camlock","CamlockEnabled",20)
+Slider(PgCombat,"Camlock Smooth","CamlockSmooth",1,30,21)
+Slider(PgCombat,"Camlock Pred F","CamlockPredF",0,15,22)
+
+----------------------------------------------------------------
+-- VISUAL TAB
+----------------------------------------------------------------
+Section(PgVisual,"ESP")
+Toggle(PgVisual,"ESP","ESPEnabled",1)
+Toggle(PgVisual,"Boxes","ESPBoxes",2)
+Toggle(PgVisual,"Corner Style","ESPCorner",3)
+Toggle(PgVisual,"Names","ESPNames",4)
+Toggle(PgVisual,"Distance","ESPDistance",5)
+Toggle(PgVisual,"Health Bar","ESPHealthBar",6)
+Toggle(PgVisual,"Tracers","ESPTracers",7)
+Toggle(PgVisual,"Skeleton","ESPSkeleton",8)
+Slider(PgVisual,"Max Distance","ESPMaxDist",50,2000,9)
+
+----------------------------------------------------------------
+-- MOVEMENT TAB
+----------------------------------------------------------------
+Section(PgMove,"Fly")
+Toggle(PgMove,"Fly","FlyEnabled",1)
+Toggle(PgMove,"Noclip","FlyNoClip",2)
+Slider(PgMove,"Speed","FlySpeed",5,500,3)
+Slider(PgMove,"Boost Speed","FlyBoost",10,1000,4)
+Slider(PgMove,"Acceleration","FlyAccel",1,30,5)
+
+----------------------------------------------------------------
+-- SETTINGS TAB
+----------------------------------------------------------------
+Section(PgSettings,"Interface")
+Toggle(PgSettings,"Silent Mode","SilentMode",1)
+Toggle(PgSettings,"Team Check","TeamCheck",2)
+Label(PgSettings,"UI Toggle: Left Alt",3)
+
+----------------------------------------------------------------
+-- CONFIG TAB
+----------------------------------------------------------------
+Section(PgConfig,"Config Manager")
+local CONFIG_FOLDER    = "Kori_DaHood"
+local CONFIG_SUBFOLDER = CONFIG_FOLDER.."/configs"
+local AUTOLOAD_PATH    = CONFIG_FOLDER.."/autoload.txt"
+
+pcall(function()
+    if not isfolder(CONFIG_FOLDER)    then makefolder(CONFIG_FOLDER)    end
+    if not isfolder(CONFIG_SUBFOLDER) then makefolder(CONFIG_SUBFOLDER) end
+end)
+
+local function SerializeConfig()
+    local t={}
+    for k,v in pairs(S) do t[k]=v end
+    local str="return {"
+    for k,v in pairs(t) do
+        if type(v)=="boolean" then str=str..k.."="..tostring(v)..","
+        elseif type(v)=="number" then str=str..k.."="..tostring(v).."," end
+    end
+    return str.."}"
+end
+
+local function DeserializeConfig(str)
+    local ok,res=pcall(loadstring(str))
+    if ok and type(res)=="table" then
+        for k,v in pairs(res) do
+            if S[k]~=nil then S[k]=v end
+        end
+    end
+end
+
+local function GetConfigList()
+    local ok,files=pcall(listfiles,CONFIG_SUBFOLDER)
+    if not ok then return {} end
+    local names={}
+    for _,f in ipairs(files) do
+        local name=f:match("([^/\\]+)%.kori$")
+        if name then table.insert(names,name) end
+    end
+    return names
+end
+
+local configInputBox=TextInput(PgConfig,"config name...",1)
+
+Button(PgConfig,"Save Config",function()
+    local name=configInputBox.Text~="" and configInputBox.Text or "default"
+    pcall(function()
+        writefile(CONFIG_SUBFOLDER.."/"..name..".kori", SerializeConfig())
+    end)
+    Notify("saved: "..name)
+end,2)
+
+Button(PgConfig,"Load Selected",function()
+    local name=configInputBox.Text~="" and configInputBox.Text or "default"
+    pcall(function()
+        local path=CONFIG_SUBFOLDER.."/"..name..".kori"
+        if isfile(path) then DeserializeConfig(readfile(path)); Notify("loaded: "..name) end
+    end)
+end,3)
+
+Button(PgConfig,"Delete Selected",function()
+    local name=configInputBox.Text~="" and configInputBox.Text or "default"
+    pcall(function()
+        local path=CONFIG_SUBFOLDER.."/"..name..".kori"
+        if isfile(path) then delfile(path); Notify("deleted: "..name) end
+    end)
+end,4)
+
+Button(PgConfig,"Set Autoload",function()
+    local name=configInputBox.Text~="" and configInputBox.Text or "default"
+    pcall(function() writefile(AUTOLOAD_PATH,name) end)
+    Notify("autoload: "..name)
+end,5)
+
+local autoLabel=Label(PgConfig,"Autoload: none",6)
+pcall(function()
+    if isfile(AUTOLOAD_PATH) then
+        local name=readfile(AUTOLOAD_PATH)
+        autoLabel.Text="Autoload: "..name
+        local path=CONFIG_SUBFOLDER.."/"..name..".kori"
+        if isfile(path) then DeserializeConfig(readfile(path)) end
     end
 end)
 
-local function GetCharacter(p) return p and p.Character end
-local function GetPart(p, name) local c = GetCharacter(p); return c and c:FindFirstChild(name) end
-local function GetRoot(p) return GetPart(p, "HumanoidRootPart") end
-local function GetHead(p) return GetPart(p, "Head") end
-local function GetHumanoid(p) local c = GetCharacter(p); return c and c:FindFirstChildOfClass("Humanoid") end
-local function IsAlive(p) local h = GetHumanoid(p); return h and h.Health > 0 end
-local function GetCenter() return Vector2.new(Camera.ViewportSize.X * .5, Camera.ViewportSize.Y * .5) end
-local function W2S(pos) local vp, vis = Camera:WorldToViewportPoint(pos); return Vector2.new(vp.X, vp.Y), vis, vp.Z end
-local function Predict(root, frames)
-    if not root then return nil end
-    return root.Position + root.AssemblyLinearVelocity * (frames / 60)
-end
-
-local function GetFOVTarget(fovRadius)
-    fovRadius = fovRadius or (Options.AimbotFOV and Options.AimbotFOV.Value) or 150
-    local best, bestDist = nil, math.huge
-    local center = GetCenter()
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p == LocalPlayer or not IsAlive(p) then continue end
-        if Toggles.GlobalTeamCheck and Toggles.GlobalTeamCheck.Value then
-            if p.Team == LocalPlayer.Team then continue end
-        end
-        local head = GetHead(p); if not head then continue end
-        local vp, onScreen = W2S(head.Position)
-        if onScreen then
-            local d = (vp - center).Magnitude
-            if d < fovRadius and d < bestDist then bestDist, best = d, p end
-        end
+----------------------------------------------------------------
+-- UI TOGGLE — LEFT ALT
+----------------------------------------------------------------
+UserInputService.InputBegan:Connect(function(input,gpe)
+    if gpe then return end
+    if input.KeyCode==Enum.KeyCode.LeftAlt then
+        S.UIVisible=not S.UIVisible
+        ScreenGui.Enabled=S.UIVisible
     end
-    return best, bestDist
-end
+end)
 
-AimbotBox:AddToggle("AimbotEnabled",    { Text = "Aimbot",        Default = false })
-AimbotBox:AddToggle("AimbotPredict",    { Text = "Prediction",    Default = true  })
-AimbotBox:AddToggle("AimbotFOVCircle",  { Text = "FOV Circle",    Default = true  })
-AimbotBox:AddSlider("AimbotFOV",        { Text = "FOV Radius",    Default = 150, Min = 10, Max = 500, Rounding = 0 })
-AimbotBox:AddSlider("AimbotSmooth",     { Text = "Smoothness",    Default = 8,   Min = 1,  Max = 50,  Rounding = 1 })
-AimbotBox:AddSlider("AimbotPredFrames", { Text = "Pred Frames",   Default = 4,   Min = 0,  Max = 15,  Rounding = 0 })
-AimbotBox:AddDropdown("AimbotPart",     { Text = "Target Part",   Default = "Head", Values = {"Head","HumanoidRootPart","Torso"} })
-
-HotkeyBox:AddKeybind("AimbotHoldKey", {
-    Text    = "Aimbot Hold",
-    Default = Enum.KeyCode.Unknown,
-    Mode    = "Hold",
-})
-HotkeyBox:AddKeybind("AimbotToggleKey", {
-    Text     = "Aimbot Toggle",
-    Default  = Enum.KeyCode.RightAlt,
-    Mode     = "Toggle",
-    Callback = function(v) Toggles.AimbotEnabled:Set(v) end,
-})
-
+----------------------------------------------------------------
+-- AIMBOT
+----------------------------------------------------------------
 local FOVCircle     = Drawing.new("Circle")
 FOVCircle.Visible   = false
 FOVCircle.Radius    = 150
@@ -144,356 +607,233 @@ FOVCircle.Filled    = false
 FOVCircle.NumSides  = 64
 
 RunService.RenderStepped:Connect(function()
-    FOVCircle.Position = GetCenter()
-    FOVCircle.Radius   = Options.AimbotFOV and Options.AimbotFOV.Value or 150
-    FOVCircle.Visible  = Toggles.AimbotEnabled.Value and Toggles.AimbotFOVCircle.Value
-    if not Toggles.AimbotEnabled.Value then return end
-    local holdKey = Options.AimbotHoldKey and Options.AimbotHoldKey.Value
-    local holding = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
-    if holdKey and holdKey ~= Enum.KeyCode.Unknown then
-        holding = holding or UserInputService:IsKeyDown(holdKey)
-    end
-    if not holding then return end
-    local target = GetFOVTarget(); if not target then return end
-    local part = GetPart(target, (Options.AimbotPart and Options.AimbotPart.Value) or "Head")
-    if not part then return end
-    local aimWorld = Toggles.AimbotPredict.Value
-        and (Predict(GetRoot(target), Options.AimbotPredFrames and Options.AimbotPredFrames.Value or 4) or part.Position)
-        or part.Position
-    local aimVP  = Camera:WorldToViewportPoint(aimWorld)
-    local aimVec = Vector2.new(aimVP.X, aimVP.Y)
-    local center = GetCenter()
-    local smooth = Options.AimbotSmooth and Options.AimbotSmooth.Value or 8
-    local delta  = aimVec - center
-    if delta.Magnitude > 1 then
-        mousemoverel(delta.X / smooth, delta.Y / smooth)
-    end
+    FOVCircle.Position=GetCenter()
+    FOVCircle.Radius=S.AimbotFOV
+    FOVCircle.Visible=S.AimbotEnabled and S.AimbotFOVCirc
+    if not S.AimbotEnabled then return end
+    if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
+    local target=GetFOVTarget(); if not target then return end
+    local part=GetPart(target,"Head"); if not part then return end
+    local aimWorld=S.AimbotPredict and (Predict(GetRoot(target),S.AimbotPredF) or part.Position) or part.Position
+    local aimVP=Camera:WorldToViewportPoint(aimWorld)
+    local aimVec=Vector2.new(aimVP.X,aimVP.Y)
+    local delta=aimVec-GetCenter()
+    if delta.Magnitude>1 then mousemoverel(delta.X/S.AimbotSmooth,delta.Y/S.AimbotSmooth) end
 end)
 
-SilentBox:AddToggle("SilentAimEnabled", { Text = "Silent Aim",   Default = false })
-SilentBox:AddToggle("SilentAimPredict", { Text = "Prediction",   Default = true  })
-SilentBox:AddSlider("SilentAimChance",  { Text = "Hit Chance %", Default = 90, Min = 1, Max = 100, Rounding = 0 })
-SilentBox:AddSlider("SilentAimFrames",  { Text = "Pred Frames",  Default = 3,  Min = 0, Max = 15,  Rounding = 0 })
-SilentBox:AddDropdown("SilentAimPart",  { Text = "Hitbox",       Default = "Head", Values = {"Head","HumanoidRootPart","Torso"} })
-
-HotkeyBox:AddKeybind("SilentAimHotkey", {
-    Text     = "Silent Aim Toggle",
-    Default  = Enum.KeyCode.F2,
-    Mode     = "Toggle",
-    Callback = function(v) Toggles.SilentAimEnabled:Set(v) end,
-})
-
-local OrigWSP = safeHook(Camera.WorldToScreenPoint, function(self, worldPos)
-    if Toggles.SilentAimEnabled and Toggles.SilentAimEnabled.Value then
-        local chance = Options.SilentAimChance and Options.SilentAimChance.Value or 90
-        if math.random(1,100) <= chance then
-            local target = GetFOVTarget()
+----------------------------------------------------------------
+-- SILENT AIM
+----------------------------------------------------------------
+local OrigWSP=safeHook(Camera.WorldToScreenPoint,function(self,worldPos)
+    if S.SilentAim then
+        if math.random(1,100)<=S.SilentChance then
+            local target=GetFOVTarget()
             if target then
-                local part = GetPart(target, (Options.SilentAimPart and Options.SilentAimPart.Value) or "Head")
+                local part=GetPart(target,"Head")
                 if part then
-                    worldPos = Toggles.SilentAimPredict.Value
-                        and (Predict(GetRoot(target), Options.SilentAimFrames and Options.SilentAimFrames.Value or 3) or part.Position)
-                        or part.Position
+                    worldPos=S.SilentPredict and (Predict(GetRoot(target),S.SilentPredF) or part.Position) or part.Position
                 end
             end
         end
     end
-    return OrigWSP(self, worldPos)
+    return OrigWSP(self,worldPos)
 end)
 
-TriggerBox:AddToggle("TriggerEnabled",  { Text = "Triggerbot",        Default = false })
-TriggerBox:AddToggle("TriggerPredict",  { Text = "Prediction",        Default = true  })
-TriggerBox:AddToggle("TriggerHeadOnly", { Text = "Head Only",         Default = false })
-TriggerBox:AddToggle("TriggerHumanise", { Text = "Humanise",          Default = true  })
-TriggerBox:AddToggle("TriggerHoldMode", { Text = "Hold Key Mode",     Default = false })
-TriggerBox:AddSlider("TriggerDelayMin", { Text = "Delay Min (ms)",    Default = 60,  Min = 0,  Max = 300,  Rounding = 0 })
-TriggerBox:AddSlider("TriggerDelayMax", { Text = "Delay Max (ms)",    Default = 130, Min = 0,  Max = 600,  Rounding = 0 })
-TriggerBox:AddSlider("TriggerFOV",      { Text = "FOV (px)",          Default = 25,  Min = 1,  Max = 150,  Rounding = 0 })
-TriggerBox:AddSlider("TriggerMaxCPS",   { Text = "Max CPS",           Default = 8,   Min = 1,  Max = 20,   Rounding = 0 })
-TriggerBox:AddSlider("TriggerBurstGap", { Text = "Burst Gap (ms)",    Default = 220, Min = 50, Max = 1000, Rounding = 0 })
+----------------------------------------------------------------
+-- TRIGGERBOT
+----------------------------------------------------------------
+local tLast=0; local tCount=0; local tBurst=0
+local tCool=false; local tPrev=nil
 
-HotkeyBox:AddKeybind("TriggerHotkey", {
-    Text     = "Triggerbot Toggle",
-    Default  = Enum.KeyCode.F3,
-    Mode     = "Toggle",
-    Callback = function(v) Toggles.TriggerEnabled:Set(v) end,
-})
-HotkeyBox:AddKeybind("TriggerHoldKey", {
-    Text    = "Triggerbot Hold Key",
-    Default = Enum.KeyCode.Unknown,
-    Mode    = "Hold",
-})
-
-local tLastShot=0; local tShotCount=0; local tLastBurst=0
-local tCooldown=false; local tLastTarget=nil
-
-local overlapParams = OverlapParams.new()
-overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+local OP=OverlapParams.new()
+OP.FilterType=Enum.RaycastFilterType.Exclude
 
 RunService.Heartbeat:Connect(function()
-    if not Toggles.TriggerEnabled.Value then tShotCount=0; tLastTarget=nil; return end
-    if Toggles.TriggerHoldMode and Toggles.TriggerHoldMode.Value then
-        local hk = Options.TriggerHoldKey and Options.TriggerHoldKey.Value
-        local held = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
-        if hk and hk ~= Enum.KeyCode.Unknown then held = held or UserInputService:IsKeyDown(hk) end
-        if not held then tShotCount=0; return end
+    if not S.TriggerEnabled then tCount=0; tPrev=nil; return end
+    if S.TriggerHold then
+        if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then tCount=0; return end
     end
-    local now      = tick()
-    local maxCPS   = Options.TriggerMaxCPS   and Options.TriggerMaxCPS.Value   or 8
-    local burstGap = (Options.TriggerBurstGap and Options.TriggerBurstGap.Value or 220) / 1000
-    if tCooldown then
-        if now - tLastBurst >= burstGap then tCooldown=false; tShotCount=0
-        else return end
+    local now=tick()
+    local gap=S.TriggerBurst/1000
+    if tCool then
+        if now-tBurst>=gap then tCool=false; tCount=0 else return end
     end
-    if tShotCount >= maxCPS then tCooldown=true; tLastBurst=now; return end
-    local localChar = LocalPlayer.Character
-    overlapParams.FilterDescendantsInstances = localChar and {localChar} or {}
-    local center = GetCenter()
-    local fov    = Options.TriggerFOV and Options.TriggerFOV.Value or 25
-    local found  = false; local foundPlayer = nil
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p == LocalPlayer or not IsAlive(p) then continue end
-        if Toggles.GlobalTeamCheck and Toggles.GlobalTeamCheck.Value then
-            if p.Team == LocalPlayer.Team then continue end
-        end
-        local partName = Toggles.TriggerHeadOnly.Value and "Head" or "HumanoidRootPart"
-        local part = GetPart(p, partName); if not part then continue end
-        local checkPos = Toggles.TriggerPredict.Value
-            and (Predict(GetRoot(p), 2) or part.Position) or part.Position
-        local vp, onScreen = W2S(checkPos)
-        if onScreen and (vp - center).Magnitude < fov then
-            local hitPart = Instance.new("Part")
-            hitPart.Size=Vector3.new(0.1,0.1,0.1); hitPart.CFrame=CFrame.new(checkPos)
-            hitPart.Anchored=true; hitPart.CanCollide=false; hitPart.Parent=workspace
-            local hits = workspace:GetPartsInPart(hitPart, overlapParams)
-            hitPart:Destroy()
-            for _, hit in ipairs(hits) do
-                local model = hit:FindFirstAncestorOfClass("Model")
-                if model then
-                    local hp = Players:GetPlayerFromCharacter(model)
-                    if hp and hp ~= LocalPlayer and IsAlive(hp) then
-                        found=true; foundPlayer=hp; break
-                    end
+    if tCount>=S.TriggerMaxCPS then tCool=true; tBurst=now; return end
+    local lc=LocalPlayer.Character
+    OP.FilterDescendantsInstances=lc and {lc} or {}
+    local center=GetCenter(); local found=false; local fp=nil
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p==LocalPlayer or not IsAlive(p) then continue end
+        if S.TeamCheck and p.Team==LocalPlayer.Team then continue end
+        local part=GetPart(p,"HumanoidRootPart"); if not part then continue end
+        local cp=S.TriggerPredict and (Predict(GetRoot(p),2) or part.Position) or part.Position
+        local vp,os=W2S(cp)
+        if os and (vp-center).Magnitude<S.TriggerFOV then
+            local hp=Instance.new("Part")
+            hp.Size=Vector3.new(0.1,0.1,0.1); hp.CFrame=CFrame.new(cp)
+            hp.Anchored=true; hp.CanCollide=false; hp.Parent=workspace
+            local hits=workspace:GetPartsInPart(hp,OP); hp:Destroy()
+            for _,h in ipairs(hits) do
+                local m=h:FindFirstAncestorOfClass("Model")
+                if m then local pl=Players:GetPlayerFromCharacter(m)
+                    if pl and pl~=LocalPlayer and IsAlive(pl) then found=true; fp=pl; break end
                 end
             end
-            if not found then found=true; foundPlayer=p end
+            if not found then found=true; fp=p end
             if found then break end
         end
     end
-    if foundPlayer ~= tLastTarget then tShotCount=0; tLastTarget=foundPlayer end
-    if not found then tShotCount=0; return end
-    local dMin  = (Options.TriggerDelayMin and Options.TriggerDelayMin.Value or 60)  / 1000
-    local dMax  = (Options.TriggerDelayMax and Options.TriggerDelayMax.Value or 130) / 1000
-    local delay = Toggles.TriggerHumanise.Value
-        and (dMin + math.random() * (dMax - dMin)) or dMin
-    if now - tLastShot < delay then return end
-    tLastShot=now; tShotCount=tShotCount+1
+    if fp~=tPrev then tCount=0; tPrev=fp end
+    if not found then tCount=0; return end
+    local dMin=S.TriggerDelMin/1000; local dMax=S.TriggerDelMax/1000
+    local delay=S.TriggerHuman and (dMin+math.random()*(dMax-dMin)) or dMin
+    if now-tLast<delay then return end
+    tLast=now; tCount=tCount+1
     task.spawn(function()
-        local jScale = math.clamp(dMax*10, 0.5, 2.5)
-        if Toggles.TriggerHumanise.Value then mousemoverel((math.random()-.5)*jScale,(math.random()-.5)*jScale) end
+        local j=math.clamp(dMax*10,0.5,2.5)
+        if S.TriggerHuman then mousemoverel((math.random()-.5)*j,(math.random()-.5)*j) end
         mouse1click()
-        if Toggles.TriggerHumanise.Value then
-            task.wait(0.014+math.random()*0.018)
-            mousemoverel((math.random()-.5)*jScale,(math.random()-.5)*jScale)
-        end
+        if S.TriggerHuman then task.wait(0.014+math.random()*0.018)
+            mousemoverel((math.random()-.5)*j,(math.random()-.5)*j) end
     end)
 end)
 
-CamlockBox:AddToggle("CamlockEnabled", { Text = "Camlock",     Default = false })
-CamlockBox:AddToggle("CamlockPredict", { Text = "Prediction",  Default = true  })
-CamlockBox:AddSlider("CamlockSmooth",  { Text = "Smoothness",  Default = 4, Min = 1, Max = 30, Rounding = 1 })
-CamlockBox:AddSlider("CamlockFrames",  { Text = "Pred Frames", Default = 3, Min = 0, Max = 15, Rounding = 0 })
-CamlockBox:AddDropdown("CamlockPart",  { Text = "Lock To",     Default = "Head", Values = {"Head","HumanoidRootPart","Torso"} })
-
-HotkeyBox:AddKeybind("CamlockHotkey", {
-    Text     = "Camlock Toggle",
-    Default  = Enum.KeyCode.F4,
-    Mode     = "Toggle",
-    Callback = function(v) Toggles.CamlockEnabled:Set(v) end,
-})
-
+----------------------------------------------------------------
+-- CAMLOCK
+----------------------------------------------------------------
 RunService.RenderStepped:Connect(function()
-    if not Toggles.CamlockEnabled.Value then return end
-    local target = GetFOVTarget(); if not target then return end
-    local part = GetPart(target, (Options.CamlockPart and Options.CamlockPart.Value) or "Head")
-    if not part then return end
-    local aimPos = Toggles.CamlockPredict.Value
-        and (Predict(GetRoot(target), Options.CamlockFrames and Options.CamlockFrames.Value or 3) or part.Position)
-        or part.Position
-    local smooth = Options.CamlockSmooth and Options.CamlockSmooth.Value or 4
-    local dir    = (aimPos - Camera.CFrame.Position).Unit
-    Camera.CFrame = Camera.CFrame:Lerp(
-        CFrame.lookAt(Camera.CFrame.Position, Camera.CFrame.Position + dir), 1 / smooth
+    if not S.CamlockEnabled then return end
+    local target=GetFOVTarget(); if not target then return end
+    local part=GetPart(target,"Head"); if not part then return end
+    local aimPos=Predict(GetRoot(target),S.CamlockPredF) or part.Position
+    local dir=(aimPos-Camera.CFrame.Position).Unit
+    Camera.CFrame=Camera.CFrame:Lerp(
+        CFrame.lookAt(Camera.CFrame.Position,Camera.CFrame.Position+dir),1/S.CamlockSmooth
     )
 end)
 
-ESPBox:AddToggle("ESPEnabled",    { Text = "ESP",          Default = false })
-ESPBox:AddToggle("ESPBoxes",      { Text = "Boxes",        Default = true  })
-ESPBox:AddToggle("ESPCornerBox",  { Text = "Corner Style", Default = true  })
-ESPBox:AddToggle("ESPNames",      { Text = "Names",        Default = true  })
-ESPBox:AddToggle("ESPDistance",   { Text = "Distance",     Default = true  })
-ESPBox:AddToggle("ESPHealthBar",  { Text = "Health Bar",   Default = true  })
-ESPBox:AddToggle("ESPTracers",    { Text = "Tracers",      Default = false })
-ESPBox:AddToggle("ESPSkeleton",   { Text = "Skeleton",     Default = false })
-ESPBox:AddToggle("ESPHealthText", { Text = "HP Number",    Default = true  })
-ESPStyleBox:AddColorpicker("ESPColorEnemy",  { Text = "Enemy",     Default = Color3.fromRGB(255,60,60)   })
-ESPStyleBox:AddColorpicker("ESPColorFriend", { Text = "Team",      Default = Color3.fromRGB(60,180,255)  })
-ESPStyleBox:AddColorpicker("ESPColorTracer", { Text = "Tracer",    Default = Color3.fromRGB(255,255,255) })
-ESPStyleBox:AddSlider("ESPTextSize",         { Text = "Text Size", Default = 13,  Min = 8,  Max = 24,   Rounding = 0 })
-ESPStyleBox:AddSlider("ESPMaxDist",          { Text = "Max Dist",  Default = 500, Min = 50, Max = 2000, Rounding = 0 })
-
-HotkeyBox:AddKeybind("ESPHotkey", {
-    Text     = "ESP Toggle",
-    Default  = Enum.KeyCode.F1,
-    Mode     = "Toggle",
-    Callback = function(v) Toggles.ESPEnabled:Set(v) end,
-})
-
-local BONES = {
+----------------------------------------------------------------
+-- ESP
+----------------------------------------------------------------
+local BONES={
     {"Head","UpperTorso"},{"UpperTorso","LowerTorso"},
     {"UpperTorso","LeftUpperArm"},{"LeftUpperArm","LeftLowerArm"},{"LeftLowerArm","LeftHand"},
     {"UpperTorso","RightUpperArm"},{"RightUpperArm","RightLowerArm"},{"RightLowerArm","RightHand"},
     {"LowerTorso","LeftUpperLeg"},{"LeftUpperLeg","LeftLowerLeg"},{"LeftLowerLeg","LeftFoot"},
     {"LowerTorso","RightUpperLeg"},{"RightUpperLeg","RightLowerLeg"},{"RightLowerLeg","RightFoot"},
 }
-local CORNER_RATIO = 0.25
-
-local function NewD(t,props) local d=Drawing.new(t); for k,v in pairs(props) do d[k]=v end; return d end
-local function HideAll(obj)
-    obj.Box.Visible=false; obj.Name.Visible=false; obj.Dist.Visible=false
-    obj.HPText.Visible=false; obj.HealthBG.Visible=false; obj.HealthFG.Visible=false
-    obj.Tracer.Visible=false
-    for _,l in ipairs(obj.Corners) do l.Visible=false end
-    for _,l in ipairs(obj.Bones)   do l.Visible=false end
+local CR=0.25
+local function ND(t,p) local d=Drawing.new(t); for k,v in pairs(p) do d[k]=v end; return d end
+local function HA(o)
+    o.Box.Visible=false;o.Name.Visible=false;o.Dist.Visible=false
+    o.HBG.Visible=false;o.HFG.Visible=false;o.Tr.Visible=false
+    for _,l in ipairs(o.Co) do l.Visible=false end
+    for _,l in ipairs(o.Bo) do l.Visible=false end
 end
-local function MakeCorners() local t={}; for i=1,8 do t[i]=NewD("Line",{Thickness=1.5,Visible=false}) end; return t end
-local function MakeBones()   local t={}; for i=1,#BONES do t[i]=NewD("Line",{Thickness=1,Visible=false}) end; return t end
+local function MC() local t={}; for i=1,8 do t[i]=ND("Line",{Thickness=1.5,Visible=false}) end; return t end
+local function MB() local t={}; for i=1,#BONES do t[i]=ND("Line",{Thickness=1,Visible=false}) end; return t end
 
-local ESPObjects = {}
-local function MakeESP(player)
-    if player==LocalPlayer or ESPObjects[player] then return end
-    ESPObjects[player]={
-        Box=NewD("Square",{Filled=false,Thickness=1,Visible=false}),
-        Name=NewD("Text",{Size=13,Center=true,Outline=true,Visible=false}),
-        Dist=NewD("Text",{Size=11,Center=true,Outline=true,Visible=false}),
-        HPText=NewD("Text",{Size=11,Center=true,Outline=true,Visible=false}),
-        HealthBG=NewD("Square",{Filled=true,Color=Color3.fromRGB(0,0,0),Visible=false}),
-        HealthFG=NewD("Square",{Filled=true,Visible=false}),
-        Tracer=NewD("Line",{Thickness=1,Visible=false}),
-        Corners=MakeCorners(), Bones=MakeBones(), FrameCount=0,
+local EO={}
+local function MkE(p)
+    if p==LocalPlayer or EO[p] then return end
+    EO[p]={
+        Box=ND("Square",{Filled=false,Thickness=1,Visible=false}),
+        Name=ND("Text",{Size=13,Center=true,Outline=true,Visible=false}),
+        Dist=ND("Text",{Size=11,Center=true,Outline=true,Visible=false}),
+        HBG=ND("Square",{Filled=true,Color=Color3.fromRGB(0,0,0),Visible=false}),
+        HFG=ND("Square",{Filled=true,Visible=false}),
+        Tr=ND("Line",{Thickness=1,Visible=false}),
+        Co=MC(),Bo=MB(),FC=0,
     }
 end
-local function RemoveESP(player)
-    if not ESPObjects[player] then return end
-    for k,v in pairs(ESPObjects[player]) do
+local function RmE(p)
+    if not EO[p] then return end
+    for k,v in pairs(EO[p]) do
         if type(v)=="table" then for _,d in ipairs(v) do pcall(function()d:Remove()end) end
         elseif type(v)~="number" then pcall(function()v:Remove()end) end
     end
-    ESPObjects[player]=nil
+    EO[p]=nil
 end
 
-Players.PlayerAdded:Connect(MakeESP)
-Players.PlayerRemoving:Connect(RemoveESP)
-for _,p in ipairs(Players:GetPlayers()) do MakeESP(p) end
+Players.PlayerAdded:Connect(MkE)
+Players.PlayerRemoving:Connect(RmE)
+for _,p in ipairs(Players:GetPlayers()) do MkE(p) end
 
-local function HPColor(r)
+local function HPC(r)
     if r>.5 then return Color3.fromRGB(math.floor(255*(1-r)*2),255,0)
     else return Color3.fromRGB(255,math.floor(255*r*2),0) end
 end
 
-local function DrawCorners(c,tl,sz,col)
-    local tr=Vector2.new(tl.X+sz.X,tl.Y); local bl=Vector2.new(tl.X,tl.Y+sz.Y)
-    local br=tl+sz; local cx=sz.X*CORNER_RATIO; local cy=sz.Y*CORNER_RATIO
+local function DC(c,tl,sz,col)
+    local tr=Vector2.new(tl.X+sz.X,tl.Y);local bl=Vector2.new(tl.X,tl.Y+sz.Y)
+    local br=tl+sz;local cx=sz.X*CR;local cy=sz.Y*CR
     local function s(i,f,t) c[i].From=f;c[i].To=t;c[i].Color=col;c[i].Visible=true end
-    s(1,tl,tl+Vector2.new(cx,0)); s(2,tl,tl+Vector2.new(0,cy))
-    s(3,tr,tr-Vector2.new(cx,0)); s(4,tr,tr+Vector2.new(0,cy))
-    s(5,bl,bl+Vector2.new(cx,0)); s(6,bl,bl-Vector2.new(0,cy))
-    s(7,br,br-Vector2.new(cx,0)); s(8,br,br-Vector2.new(0,cy))
+    s(1,tl,tl+Vector2.new(cx,0));s(2,tl,tl+Vector2.new(0,cy))
+    s(3,tr,tr-Vector2.new(cx,0));s(4,tr,tr+Vector2.new(0,cy))
+    s(5,bl,bl+Vector2.new(cx,0));s(6,bl,bl-Vector2.new(0,cy))
+    s(7,br,br-Vector2.new(cx,0));s(8,br,br-Vector2.new(0,cy))
 end
 
 RunService.RenderStepped:Connect(function()
-    local maxDist=Options.ESPMaxDist and Options.ESPMaxDist.Value or 500
-    local textSz=Options.ESPTextSize and Options.ESPTextSize.Value or 13
     local center=GetCenter()
-    local bottomCenter=Vector2.new(center.X,Camera.ViewportSize.Y)
+    local bc=Vector2.new(center.X,Camera.ViewportSize.Y)
+    local ec=Color3.fromRGB(255,60,60)
+    local fc=Color3.fromRGB(60,180,255)
     for _,player in ipairs(Players:GetPlayers()) do
         if player==LocalPlayer then continue end
-        local obj=ESPObjects[player]; if not obj then continue end
-        if not Toggles.ESPEnabled.Value or not IsAlive(player) then HideAll(obj);continue end
-        local root=GetRoot(player); local head=GetHead(player)
-        if not root or not head then HideAll(obj);continue end
-        local worldDist=(Camera.CFrame.Position-root.Position).Magnitude
-        if worldDist>maxDist then HideAll(obj);continue end
-        obj.FrameCount=(obj.FrameCount or 0)+1
-        if worldDist>200 and obj.FrameCount%3~=0 then continue end
-        local rootVP,onScreen,depth=W2S(root.Position)
-        local headVP,headOS=W2S(head.Position)
-        if not onScreen or not headOS or depth<0 then HideAll(obj);continue end
-        local boxH=math.abs(rootVP.Y-headVP.Y)*2.15
-        local boxW=boxH*0.58
-        local topLeft=Vector2.new(rootVP.X-boxW*.5,headVP.Y-boxH*.07)
-        local boxSize=Vector2.new(boxW,boxH)
-        local isEnemy=not(Toggles.GlobalTeamCheck and Toggles.GlobalTeamCheck.Value and player.Team==LocalPlayer.Team)
-        local col=isEnemy
-            and (Options.ESPColorEnemy and Options.ESPColorEnemy.Value or Color3.fromRGB(255,60,60))
-            or  (Options.ESPColorFriend and Options.ESPColorFriend.Value or Color3.fromRGB(60,180,255))
-        local useCorner=Toggles.ESPCornerBox and Toggles.ESPCornerBox.Value
-        obj.Box.Visible=Toggles.ESPBoxes.Value and not useCorner
-        if obj.Box.Visible then obj.Box.Color=col;obj.Box.Position=topLeft;obj.Box.Size=boxSize end
-        if Toggles.ESPBoxes.Value and useCorner then DrawCorners(obj.Corners,topLeft,boxSize,col)
-        else for _,l in ipairs(obj.Corners) do l.Visible=false end end
-        local hum=GetHumanoid(player)
-        local hp=hum and hum.Health or 0
-        local maxHp=hum and hum.MaxHealth or 100
-        local hpRatio=math.clamp(hp/math.max(maxHp,1),0,1)
-        obj.Name.Visible=Toggles.ESPNames.Value;obj.Name.Color=col;obj.Name.Size=textSz
-        obj.Name.Text=player.DisplayName~="" and player.DisplayName or player.Name
-        obj.Name.Position=Vector2.new(rootVP.X,topLeft.Y-textSz-2)
-        obj.Dist.Visible=Toggles.ESPDistance.Value;obj.Dist.Color=Color3.fromRGB(200,200,200)
-        obj.Dist.Size=textSz-2;obj.Dist.Text=math.floor(worldDist).."m"
-        obj.Dist.Position=Vector2.new(rootVP.X,topLeft.Y+boxH+2)
-        obj.HPText.Visible=Toggles.ESPHealthText.Value;obj.HPText.Color=HPColor(hpRatio)
-        obj.HPText.Size=textSz-2;obj.HPText.Text=math.floor(hp).." HP"
-        obj.HPText.Position=Vector2.new(rootVP.X,topLeft.Y+boxH+(textSz-2)+4)
-        local barW,barH,barX=3,boxH,topLeft.X-6
-        obj.HealthBG.Visible=Toggles.ESPHealthBar.Value
-        obj.HealthBG.Position=Vector2.new(barX,topLeft.Y);obj.HealthBG.Size=Vector2.new(barW,barH)
-        obj.HealthFG.Visible=Toggles.ESPHealthBar.Value;obj.HealthFG.Color=HPColor(hpRatio)
-        obj.HealthFG.Position=Vector2.new(barX,topLeft.Y+barH*(1-hpRatio))
-        obj.HealthFG.Size=Vector2.new(barW,barH*hpRatio)
-        local tracerCol=Options.ESPColorTracer and Options.ESPColorTracer.Value or Color3.fromRGB(255,255,255)
-        obj.Tracer.Visible=Toggles.ESPTracers.Value;obj.Tracer.Color=tracerCol
-        obj.Tracer.From=bottomCenter;obj.Tracer.To=rootVP;obj.Tracer.Thickness=1
-        if Toggles.ESPSkeleton.Value then
+        local o=EO[player]; if not o then continue end
+        if not S.ESPEnabled or not IsAlive(player) then HA(o);continue end
+        local root=GetRoot(player);local head=GetHead(player)
+        if not root or not head then HA(o);continue end
+        local wd=(Camera.CFrame.Position-root.Position).Magnitude
+        if wd>S.ESPMaxDist then HA(o);continue end
+        o.FC=(o.FC or 0)+1
+        if wd>200 and o.FC%3~=0 then continue end
+        local rvp,os,dep=W2S(root.Position);local hvp,hos=W2S(head.Position)
+        if not os or not hos or dep<0 then HA(o);continue end
+        local bH=math.abs(rvp.Y-hvp.Y)*2.15;local bW=bH*0.58
+        local tl=Vector2.new(rvp.X-bW*.5,hvp.Y-bH*.07);local bS=Vector2.new(bW,bH)
+        local ie=not(S.TeamCheck and player.Team==LocalPlayer.Team)
+        local col=ie and ec or fc
+        o.Box.Visible=S.ESPBoxes and not S.ESPCorner
+        if o.Box.Visible then o.Box.Color=col;o.Box.Position=tl;o.Box.Size=bS end
+        if S.ESPBoxes and S.ESPCorner then DC(o.Co,tl,bS,col)
+        else for _,l in ipairs(o.Co) do l.Visible=false end end
+        local hum=GetHum(player)
+        local hp=hum and hum.Health or 0;local mhp=hum and hum.MaxHealth or 100
+        local hpr=math.clamp(hp/math.max(mhp,1),0,1)
+        o.Name.Visible=S.ESPNames;o.Name.Color=col;o.Name.Size=13
+        o.Name.Text=player.DisplayName~="" and player.DisplayName or player.Name
+        o.Name.Position=Vector2.new(rvp.X,tl.Y-15)
+        o.Dist.Visible=S.ESPDistance;o.Dist.Color=Color3.fromRGB(200,200,200)
+        o.Dist.Size=11;o.Dist.Text=math.floor(wd).."m"
+        o.Dist.Position=Vector2.new(rvp.X,tl.Y+bH+2)
+        local bw,bh,bx=3,bH,tl.X-6
+        o.HBG.Visible=S.ESPHealthBar;o.HBG.Position=Vector2.new(bx,tl.Y);o.HBG.Size=Vector2.new(bw,bh)
+        o.HFG.Visible=S.ESPHealthBar;o.HFG.Color=HPC(hpr)
+        o.HFG.Position=Vector2.new(bx,tl.Y+bh*(1-hpr));o.HFG.Size=Vector2.new(bw,bh*hpr)
+        o.Tr.Visible=S.ESPTracers;o.Tr.Color=Color3.fromRGB(255,255,255)
+        o.Tr.From=bc;o.Tr.To=rvp;o.Tr.Thickness=1
+        if S.ESPSkeleton then
             local char=GetCharacter(player)
             for i,pair in ipairs(BONES) do
-                local b=obj.Bones[i]
+                local b=o.Bo[i]
                 local p1=char and char:FindFirstChild(pair[1])
                 local p2=char and char:FindFirstChild(pair[2])
                 if p1 and p2 then
-                    local vp1,os1=W2S(p1.Position);local vp2,os2=W2S(p2.Position)
-                    b.Visible=os1 and os2;b.From=vp1;b.To=vp2;b.Color=col;b.Thickness=1
+                    local v1,o1=W2S(p1.Position);local v2,o2=W2S(p2.Position)
+                    b.Visible=o1 and o2;b.From=v1;b.To=v2;b.Color=col
                 else b.Visible=false end
             end
-        else for _,b in ipairs(obj.Bones) do b.Visible=false end end
+        else for _,b in ipairs(o.Bo) do b.Visible=false end end
     end
 end)
 
-FlyBox:AddToggle("FlyEnabled", { Text = "Fly",          Default = false })
-FlyBox:AddToggle("FlyNoClip",  { Text = "Noclip",       Default = true  })
-FlyBox:AddSlider("FlySpeed",   { Text = "Speed",        Default = 60,  Min = 5,  Max = 500,  Rounding = 0 })
-FlyBox:AddSlider("FlyBoost",   { Text = "Boost Speed",  Default = 180, Min = 10, Max = 1000, Rounding = 0 })
-FlyBox:AddSlider("FlyAccel",   { Text = "Acceleration", Default = 8,   Min = 1,  Max = 30,   Rounding = 1 })
-
-HotkeyBox:AddKeybind("FlyHotkey", {
-    Text     = "Fly Toggle",
-    Default  = Enum.KeyCode.F,
-    Mode     = "Toggle",
-    Callback = function(v) Toggles.FlyEnabled:Set(v) end,
-})
-
-local FlyAttach=nil; local FlyLinear=nil; local FlyBody=nil
-local FlyUseLV=true; local FlyCurrentV=Vector3.zero
+----------------------------------------------------------------
+-- FLY V3
+----------------------------------------------------------------
+local FA=nil;local FL=nil;local FB=nil
+local FLV=true;local FCV=Vector3.zero
 
 local function EnableFly()
     local char=LocalPlayer.Character; if not char then return end
@@ -502,177 +842,72 @@ local function EnableFly()
     if not root or not hum then return end
     hum.PlatformStand=true
     local ok=pcall(function()
-        FlyAttach=Instance.new("Attachment"); FlyAttach.Parent=root
-        FlyLinear=Instance.new("LinearVelocity")
-        FlyLinear.Attachment0=FlyAttach
-        FlyLinear.VectorVelocity=Vector3.zero
-        FlyLinear.MaxForce=1e6
-        FlyLinear.RelativeTo=Enum.ActuatorRelativeTo.World
-        FlyLinear.Parent=root
-        FlyUseLV=true
+        FA=Instance.new("Attachment");FA.Parent=root
+        FL=Instance.new("LinearVelocity")
+        FL.Attachment0=FA;FL.VectorVelocity=Vector3.zero
+        FL.MaxForce=1e6;FL.RelativeTo=Enum.ActuatorRelativeTo.World
+        FL.Parent=root;FLV=true
     end)
     if not ok then
-        if FlyAttach then FlyAttach:Destroy(); FlyAttach=nil end
-        if FlyLinear then FlyLinear:Destroy(); FlyLinear=nil end
-        FlyBody=Instance.new("BodyVelocity")
-        FlyBody.Velocity=Vector3.zero
-        FlyBody.MaxForce=Vector3.new(1e6,1e6,1e6)
-        FlyBody.Parent=root
-        FlyUseLV=false
+        if FA then FA:Destroy();FA=nil end
+        if FL then FL:Destroy();FL=nil end
+        FB=Instance.new("BodyVelocity")
+        FB.Velocity=Vector3.zero;FB.MaxForce=Vector3.new(1e6,1e6,1e6)
+        FB.Parent=root;FLV=false
     end
 end
 
 local function DisableFly()
-    if FlyLinear then FlyLinear:Destroy(); FlyLinear=nil end
-    if FlyAttach then FlyAttach:Destroy(); FlyAttach=nil end
-    if FlyBody   then FlyBody:Destroy();  FlyBody=nil   end
-    FlyCurrentV=Vector3.zero
+    if FL then FL:Destroy();FL=nil end
+    if FA then FA:Destroy();FA=nil end
+    if FB then FB:Destroy();FB=nil end
+    FCV=Vector3.zero
     local char=LocalPlayer.Character
     local hum=char and char:FindFirstChildOfClass("Humanoid")
-    if hum then hum.PlatformStand=false; hum.WalkSpeed=16; hum.JumpPower=50 end
+    if hum then hum.PlatformStand=false;hum.WalkSpeed=16;hum.JumpPower=50 end
 end
 
-Toggles.FlyEnabled:OnChanged(function(v)
-    if v then EnableFly() else DisableFly() end
+UserInputService.InputBegan:Connect(function(input,gpe)
+    if gpe then return end
+    if input.KeyCode==Enum.KeyCode.F then
+        S.FlyEnabled=not S.FlyEnabled
+        if S.FlyEnabled then EnableFly() else DisableFly() end
+        Notify("Fly: "..(S.FlyEnabled and "ON" or "OFF"))
+    end
 end)
 
 RunService.RenderStepped:Connect(function(dt)
-    if Toggles.FlyNoClip and Toggles.FlyNoClip.Value then
+    if S.FlyNoClip then
         local char=LocalPlayer.Character
         if char then for _,p in ipairs(char:GetDescendants()) do
             if p:IsA("BasePart") then p.CanCollide=false end
         end end
     end
-    if not Toggles.FlyEnabled.Value then return end
-    if not FlyLinear and not FlyBody then return end
+    if not S.FlyEnabled then return end
+    if not FL and not FB then return end
     local char=LocalPlayer.Character; if not char then return end
     local root=char:FindFirstChild("HumanoidRootPart")
     local hum=char:FindFirstChildOfClass("Humanoid")
     if not root then return end
-    if hum then hum.WalkSpeed=16; hum.JumpPower=50 end
-    local boosting=UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
-    local speed=boosting
-        and (Options.FlyBoost and Options.FlyBoost.Value or 180)
-        or  (Options.FlySpeed and Options.FlySpeed.Value or 60)
-    local accel=Options.FlyAccel and Options.FlyAccel.Value or 8
-    local cf=Camera.CFrame; local target=Vector3.zero
-    if UserInputService:IsKeyDown(Enum.KeyCode.W)           then target+=cf.LookVector          end
-    if UserInputService:IsKeyDown(Enum.KeyCode.S)           then target-=cf.LookVector          end
-    if UserInputService:IsKeyDown(Enum.KeyCode.A)           then target-=cf.RightVector         end
-    if UserInputService:IsKeyDown(Enum.KeyCode.D)           then target+=cf.RightVector         end
-    if UserInputService:IsKeyDown(Enum.KeyCode.Space)       then target+=Vector3.new(0,1,0)     end
-    if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then target-=Vector3.new(0,1,0)     end
-    local targetV=target.Magnitude>0 and target.Unit*speed or Vector3.zero
-    FlyCurrentV=FlyCurrentV:Lerp(targetV,math.clamp(accel*dt,0,1))
-    if FlyUseLV and FlyLinear then FlyLinear.VectorVelocity=FlyCurrentV
-    elseif FlyBody then FlyBody.Velocity=FlyCurrentV end
+    if hum then hum.WalkSpeed=16;hum.JumpPower=50 end
+    local boost=UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
+    local spd=boost and S.FlyBoost or S.FlySpeed
+    local cf=Camera.CFrame;local tv=Vector3.zero
+    if UserInputService:IsKeyDown(Enum.KeyCode.W) then tv+=cf.LookVector end
+    if UserInputService:IsKeyDown(Enum.KeyCode.S) then tv-=cf.LookVector end
+    if UserInputService:IsKeyDown(Enum.KeyCode.A) then tv-=cf.RightVector end
+    if UserInputService:IsKeyDown(Enum.KeyCode.D) then tv+=cf.RightVector end
+    if UserInputService:IsKeyDown(Enum.KeyCode.Space) then tv+=Vector3.new(0,1,0) end
+    if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then tv-=Vector3.new(0,1,0) end
+    local tgv=tv.Magnitude>0 and tv.Unit*spd or Vector3.zero
+    FCV=FCV:Lerp(tgv,math.clamp(S.FlyAccel*dt,0,1))
+    if FLV and FL then FL.VectorVelocity=FCV elseif FB then FB.Velocity=FCV end
     root.CFrame=CFrame.new(root.Position,root.Position+cf.LookVector)
 end)
 
 LocalPlayer.CharacterAdded:Connect(function()
-    FlyLinear=nil; FlyAttach=nil; FlyBody=nil; FlyCurrentV=Vector3.zero
-    if Toggles.FlyEnabled.Value then task.wait(0.5); EnableFly() end
+    FL=nil;FA=nil;FB=nil;FCV=Vector3.zero
+    if S.FlyEnabled then task.wait(0.5);EnableFly() end
 end)
 
-local CONFIG_FOLDER    = "Kori_DaHood"
-local CONFIG_SUBFOLDER = CONFIG_FOLDER.."/configs"
-local AUTOLOAD_PATH    = CONFIG_FOLDER.."/autoload.txt"
-
-if not isfolder(CONFIG_FOLDER)    then makefolder(CONFIG_FOLDER)    end
-if not isfolder(CONFIG_SUBFOLDER) then makefolder(CONFIG_SUBFOLDER) end
-
-local function GetConfigList()
-    local files=listfiles(CONFIG_SUBFOLDER); local names={}
-    for _,f in ipairs(files) do
-        local name=f:match("([^/\\]+)%.json$") or f:match("([^/\\]+)%.cfg$")
-        if name then table.insert(names,name) end
-    end
-    return names
-end
-
-local function SaveConfig(name)
-    if name=="" then return end
-    SaveManager:Save(CONFIG_SUBFOLDER.."/"..name)
-    Notify("config saved: "..name, "", 3)
-end
-
-local function LoadConfig(name)
-    if name=="" then return end
-    local path=CONFIG_SUBFOLDER.."/"..name
-    if isfile(path) or isfile(path..".json") then
-        SaveManager:Load(path)
-        Notify("config loaded: "..name, "", 3)
-    end
-end
-
-local function DeleteConfig(name)
-    if name=="" then return end
-    local path=CONFIG_SUBFOLDER.."/"..name
-    if isfile(path) then delfile(path) end
-    if isfile(path..".json") then delfile(path..".json") end
-    Notify("config deleted: "..name, "", 3)
-end
-
-local function SetAutoload(name) writefile(AUTOLOAD_PATH,name); Notify("autoload set: "..name,"",3) end
-local function GetAutoload() if isfile(AUTOLOAD_PATH) then return readfile(AUTOLOAD_PATH) end; return "" end
-
-local configNames=GetConfigList()
-if #configNames==0 then configNames={"(none)"} end
-local configInput=""
-
-ConfigBox:AddInput("ConfigNameInput",{
-    Text="Config Name",Default="",Numeric=false,Finished=false,
-    Placeholder="type config name...",
-    Callback=function(v) configInput=v end,
-})
-ConfigBox:AddButton("Save Config",function()
-    local name=configInput~="" and configInput or "default"
-    SaveConfig(name)
-    local updated=GetConfigList()
-    if Options.ConfigDropdown then Options.ConfigDropdown:SetValues(#updated>0 and updated or {"(none)"}) end
-end)
-ConfigBox:AddButton("Load Config",function()
-    if Options.ConfigDropdown then
-        local sel=Options.ConfigDropdown.Value
-        if sel and sel~="(none)" then LoadConfig(sel) end
-    end
-end)
-ConfigBox:AddButton("Delete Config",function()
-    if Options.ConfigDropdown then
-        local sel=Options.ConfigDropdown.Value
-        if sel and sel~="(none)" then
-            DeleteConfig(sel)
-            local updated=GetConfigList()
-            Options.ConfigDropdown:SetValues(#updated>0 and updated or {"(none)"})
-        end
-    end
-end)
-ConfigBox:AddButton("Set as Autoload",function()
-    if Options.ConfigDropdown then
-        local sel=Options.ConfigDropdown.Value
-        if sel and sel~="(none)" then SetAutoload(sel) end
-    end
-end)
-ConfigBox:AddDropdown("ConfigDropdown",{
-    Text="Config List",Values=configNames,Default=configNames[1],
-})
-ConfigBox:AddButton("Refresh List",function()
-    local updated=GetConfigList()
-    if Options.ConfigDropdown then
-        Options.ConfigDropdown:SetValues(#updated>0 and updated or {"(none)"})
-    end
-end)
-ConfigBox:AddLabel("Autoload: "..(GetAutoload()~="" and GetAutoload() or "none"))
-
-local autoName=GetAutoload()
-if autoName~="" then task.wait(0.3); LoadConfig(autoName) end
-
-ThemeManager:SetLibrary(Library)
-SaveManager:SetLibrary(Library)
-SaveManager:IgnoreThemeSettings()
-SaveManager:SetFolder("Kori_DaHood")
-SaveManager:BuildConfigSection(Tabs.Settings)
-ThemeManager:BuildThemeSection(ThemeBox)
-SaveManager:LoadAutoloadConfig()
-
-Notify("Kori", "loaded — left alt toggles UI", 4)
+Notify("Kori loaded — Left Alt toggles UI")
